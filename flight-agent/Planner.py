@@ -5,7 +5,6 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 import json
 import os
-import openai
 
 from dotenv import load_dotenv
 
