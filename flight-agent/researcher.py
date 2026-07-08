@@ -1,6 +1,7 @@
 # researcher.py
 import os
 import json
+from pathlib import Path
 from typing import TypedDict, Optional, List
 from datetime import datetime
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -9,9 +10,10 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from serpapi import GoogleSearch
 from dotenv import load_dotenv
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 
-load_dotenv()
-
+# load_dotenv()
+load_dotenv(Path(__file__).with_name(".env"))
 
 # ── 1. EXTENDED STATE ─────────────────────────────────────────
 # We ADD to the state from Phase 1, never replace it.
@@ -227,7 +229,8 @@ def researcher_node(state: FlightSearchState) -> dict:
     # It adds tool schemas to the LLM's context automatically.
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.5-flash-lite",        
-        temperature=0
+        temperature=0,
+        google_api_key=os.getenv("GOOGLE_API_KEY")
     ).bind_tools(tools)
     
     system_prompt = """You are a flight data researcher. Your job is to find real flight options.
@@ -276,54 +279,46 @@ Search for available flights and return the results."""
     iterations = 0
     search_attempts = 0
     all_flights = []
+
+    print("SERPAPI key present:", bool(os.getenv("SERPAPI_KEY")))
     
     while iterations < max_iterations:
         iterations += 1
-        
+
         response = llm.invoke(messages)
-        
-        # Add assistant response to message history
-        # Why? ReAct needs the full conversation history.
-        # The LLM uses past tool results to decide next action.
-        messages.append({"role": "assistant", "content": response.content,
-                        "tool_calls": response.tool_calls if hasattr(response, 'tool_calls') else []})
-        
-        # Check if LLM wants to call tools
-        if not response.tool_calls:
-            # No more tool calls = LLM is done reasoning
+
+        tool_calls = getattr(response, "tool_calls", None) or []
+
+        messages.append(AIMessage(content=response.content, tool_calls=tool_calls))
+
+        if not tool_calls:
             print(f"\n✅ Researcher finished after {iterations} iterations")
             break
-        
-        # Execute each tool call
-        for tool_call in response.tool_calls:
+
+        for tool_call in tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
-            
+
             print(f"\n🔧 Calling tool: {tool_name}")
             print(f"   Args: {tool_args}")
-            
-            # Find and execute the right tool
+
             tool_func = next((t for t in tools if t.name == tool_name), None)
             if not tool_func:
                 tool_result = json.dumps({"error": f"Tool {tool_name} not found"})
             else:
                 tool_result = tool_func.invoke(tool_args)
-                
-                # Track flight search attempts separately
+
                 if tool_name == "search_google_flights":
                     search_attempts += 1
                     result_data = json.loads(tool_result)
                     if result_data.get("success") and result_data.get("flights"):
                         all_flights = result_data["flights"]
-            
-            # Add tool result to message history
-            # Why this specific format? OpenAI expects tool results
-            # in a specific message format with role "tool"
-            messages.append({
-                "role": "tool",
-                "content": tool_result,
-                "tool_call_id": tool_call["id"]
-            })
+
+            messages.append(ToolMessage(
+                content=tool_result,
+                tool_call_id=tool_call.get("id", "tool"),
+                name=tool_name
+            ))
     
     # Write results to state
     if all_flights:
